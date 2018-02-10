@@ -1,0 +1,595 @@
+---
+title: "Ridership Prediction - SVM Model"
+author: "Section1-Team7"
+date: "December 10, 2017"
+output: html_document
+---
+
+## Run the code for SVM static, 2-week dynamic and 1-day dynamic  models.
+
+# Assigning required libraries and working directory
+
+```{r,warning=FALSE}
+library(mlr)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(gridExtra)
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(tidyr)
+library(data.table)
+library(zoo)
+setwd("D:/FT1 - Team 7/Data/Peiwen/Predictive Final Folder v1")
+```
+
+# Importing Ridership, weather, school information to complete major portion of data extraction
+
+```{r,warning=FALSE}
+usage_pred <- read.csv("Usage.csv")
+usage_pred <- subset(usage_pred, select = c("Date","Ridership"))
+#usage_pred$Date <- format(as.Date(usage_pred$Date), format = "%m/%d/%Y")
+weather_pred <- read.csv("Weather.csv")
+#weather_pred$Date <- format(as.Date(weather_pred$Date), format = "%m/%d/%Y")
+school_pred <- read.csv("School.csv")
+school_pred$Status <- toupper(school_pred$Status)
+school_pred1 <- school_pred[,1:3]
+school_pred_new <- reshape(school_pred1,timevar = "DistrictName",idvar = c("Date"),direction = "wide")
+school_pred_new %>% mutate_if(is.factor,as.character) -> school_pred_new_char
+date_list <- subset(usage_pred,select = c("Date"))
+date_list %>% mutate_if(is.factor,as.character) -> date_list_char
+school_pred_new2 <- merge(date_list_char,school_pred_new_char,by.x = "Date", by.y = "Date", all.x = TRUE)
+school_pred_new2$`usage_pred$Date` <- as.Date(school_pred_new2$Date,"%m/%d/%Y")
+school_pred_new2 %>% arrange(`usage_pred$Date`) -> school_pred_new2
+```
+
+# First, we treat the school information as it is not in a machine learning format. The school information is present only after 2014 August 21st. Hence, we filter out that information out.
+
+```{r,warning=FALSE}
+school_pred_new2 %>% filter(`usage_pred$Date` >= "2014-08-21") -> schoolfill1
+schoolfill2 <- schoolfill1[,c(2:47)]
+schoolfill2[schoolfill2 == "OFF"] <- NA 
+schoolfill2$Date <- schoolfill1[,1]
+schoolfill2 %>% na.locf(.,na.rm = FALSE) -> schoolfill3
+schoolfill3[is.na(schoolfill3)] <- "END"
+schoolfill3 %>% select(Date,everything()) -> schoolfill3
+schoolfill1_1 <- schoolfill1[,c(2:47)]
+schoolfill3_1 <- schoolfill3[,-1]
+schoolfill3_1[schoolfill1_1 == "OFF"] <- "OFF"
+schoolfill3_1$Date <- schoolfill2$Date
+schoolfill3_1 %>% select(Date,everything()) -> schoolfill3_1
+schoolfill3_1$Date <- as.Date(schoolfill3_1$Date,"%m/%d/%Y")
+```
+
+# We then treat the 2013 and 2014 months for which don't have school information by using the school information from 2014 August.
+
+```{r,warning=FALSE}
+calender_pred <- read.csv("updated_calendar_holidays.csv")
+calender_pred %>% mutate_if(is.factor,as.character) -> calender_pred_char
+calender_pred_char$Date <- as.Date(calender_pred_char$Date,"%m/%d/%Y")
+calender_pred_char$LYDate <- as.Date(calender_pred_char$LYDate,"%m/%d/%Y")
+calender_pred_char$X2YDate <- as.Date(calender_pred_char$X2YDate,"%m/%d/%Y")
+calender_pred_char$LYHolidayDate <- as.Date(calender_pred_char$LYHolidayDate,"%m/%d/%Y")
+calender_pred_char$X2YHolidayDate <- as.Date(calender_pred_char$X2YHolidayDate,"%m/%d/%Y")
+
+schoolfill3_2 <- merge(schoolfill3_1,calender_pred_char,by = "Date", all.x = TRUE)
+
+# Using 2014 information to fill for 2013 dataset
+
+school_pred_new2 %>% filter(`usage_pred$Date` < "2014-08-21") -> schoolpre2014
+schoolpre2014 <- schoolpre2014[,-1]
+year2yeardates <- calender_pred_char[,c(1,3)]
+schoolpre2014_1 <- merge(schoolpre2014,year2yeardates,by.x = "usage_pred$Date", by.y = "X2YDate", all.x = TRUE)
+schoolpre2014_1 %>% select(Date,everything()) %>% select(c(Date)) -> schoolpre2014_2
+
+schoolpre2014_3 <- merge(schoolpre2014_2,schoolfill3_2,by.x = "Date", all.x = TRUE)
+schoolpre2014_3 %>% select(-c(LYDate,X2YDate,LYHolidayDate,X2YHolidayDate,Holiday)) -> schoolpre2014_3
+schoolpre2014_4 <- merge(schoolpre2014_3,schoolpre2014_1[,c("Date","usage_pred$Date")],by = "Date", all.x = TRUE)
+schoolpre2014_4 %>% select(`usage_pred$Date`,everything()) %>% select(-c(Date)) -> schoolpre2014_4
+schoolpre2014_5 <- merge(schoolpre2014_4,calender_pred_char[,c("Date","Holiday")],by.x = "usage_pred$Date", by.y = "Date", all.x = TRUE) 
+schoolpre2014_5[schoolpre2014_5$Holiday != "NULL",2:47] <- "OFF"
+names(schoolpre2014_5)[names(schoolpre2014_5) == 'usage_pred$Date'] <- 'Date'
+
+schoolfill3_2 %>% select(-c(LYDate,X2YDate,LYHolidayDate,X2YHolidayDate)) -> schoolfill3_2
+
+# Combining
+schoolinfofinal <- rbind(schoolpre2014_5,schoolfill3_2)
+```
+
+# We merge the ridership, weather and treated school information to form the first part of the dataset.
+
+```{r,warning=FALSE}
+schoolinfofinal %>% mutate_if(is.character,as.factor) -> school_pred
+#school_pred$Date <- as.Date(school_pred$Date)
+#weather_pred$Date <- as.Date(weather_pred$Date, format = "%m/%d/%Y")
+usage_weather <- merge(usage_pred,weather_pred,by.x = "Date",by.y = "Date",all.x = TRUE)
+#school_pred <- read.csv("School.csv")
+usage_weather$Date <- mdy(usage_weather$Date)
+usage_weather_school <- merge(usage_weather,school_pred,by.x = "Date",by.y = "Date",all.x = TRUE)
+
+#usage_weather_school$Date <- mdy(usage_weather_school$Date)
+usage_weather_school$day <- weekdays(as.Date(usage_weather_school$Date))
+finaldataset_rwshd <- usage_weather_school
+finaldataset_rwshd$day <- as.factor(finaldataset_rwshd$day)
+```
+
+# We removed Christmas information from the dataset because park is closed on Christmas. 
+
+```{r,warning=FALSE}
+finaldataset_rwshd <- finaldataset_rwshd[finaldataset_rwshd$Holiday != "Christmas Day",]
+calender_pred$Date <- as.Date(calender_pred$Date, format = "%m/%d/%Y")
+calender_pred$LYDate <- as.Date(calender_pred$LYDate, format = "%m/%d/%Y")
+calender_pred$X2YDate <- as.Date(calender_pred$X2YDate, format = "%m/%d/%Y")
+finaldataset_rwshd_lyr1 <- merge(finaldataset_rwshd,calender_pred[,c("Date","LYDate","X2YDate")],by.x = "Date",by.y = "Date",all.x = TRUE)
+
+finaldataset_rwshd_lyr2 <- merge(finaldataset_rwshd_lyr1,finaldataset_rwshd[,c("Date","Ridership")],by.x = "LYDate",by.y = "Date",all.x = TRUE)
+
+
+```
+
+# 2012 ridership was provided separately. We add this ridership information to the dataset. For modeling purposes, we create 7-day lag, 1-day lag, 2 day lag, 1 year lag and 1 year + 1 day lag. We also observe that part was closed on thanksgiving 2016. Hence, we treat this field with previous year's mean values.
+
+```{r,warning=FALSE}
+# add rides in 2012
+ridership2012<-read.csv("2012Ridership.csv")
+ridership2012$Date <-as.Date(ridership2012$Date)
+ridership2012 <- ridership2012%>%group_by(Date) %>%summarise(Ridership = sum(Total.Uses))
+
+finaldataset_rwshd_lyr3 <- merge(finaldataset_rwshd_lyr2,ridership2012,by.x = "LYDate",by.y = "Date",all.x = TRUE)
+finaldataset_rwshd_lyr3$Ridership.y <- ifelse(is.na(finaldataset_rwshd_lyr3$Ridership.y),finaldataset_rwshd_lyr3$Ridership,finaldataset_rwshd_lyr3$Ridership.y )
+names(finaldataset_rwshd_lyr3)[57]<-"LYRidership"
+names(finaldataset_rwshd_lyr3)[3]<-"TYRidership"
+
+finaldataset_rwshd_lyr4 <- merge(finaldataset_rwshd_lyr3,finaldataset_rwshd_lyr3[,c("LYDate","LYRidership")],by.x = "X2YDate",by.y = "LYDate",all.x = TRUE)
+finaldataset_rwshd_lyr4 <-finaldataset_rwshd_lyr4[-c(58)]
+names(finaldataset_rwshd_lyr4)[57]<-"LYRidership"
+names(finaldataset_rwshd_lyr4)[58]<-"X2YRidership"
+
+#add lag 7 days
+finaldataset_rwshd_lyr4$LWDate <- finaldataset_rwshd_lyr4$Date -7
+finaldataset_rwshd_lyr5 <- merge(finaldataset_rwshd_lyr4,finaldataset_rwshd_lyr4[,c("Date","TYRidership")],by.x = "LWDate",by.y = "Date",all.x = TRUE)
+names(finaldataset_rwshd_lyr5)[5]<-"TYRidership"
+names(finaldataset_rwshd_lyr5)[60]<-"LWRidership"
+finaldataset_rwshd_lyr5[is.na(finaldataset_rwshd_lyr5$LWRidership),"LWRidership"] <- mean(finaldataset_rwshd_lyr5[is.na(finaldataset_rwshd_lyr5$LWRidership),"TYRidership"])
+
+# add lag LY_mines1W_Date
+finaldataset_rwshd_lyr5$LY_mines1W_Date <- finaldataset_rwshd_lyr4$LYDate -7
+finaldataset_rwshd_lyr6 <-merge(finaldataset_rwshd_lyr5,finaldataset_rwshd_lyr5[,c("LYDate","LYRidership")],by.x = "LY_mines1W_Date",by.y = "LYDate",all.x = TRUE)
+names(finaldataset_rwshd_lyr6)[59]<-"LYRidership"
+names(finaldataset_rwshd_lyr6)[62]<-"LY_mines1W_Ridership"
+finaldataset_rwshd_lyr6[is.na(finaldataset_rwshd_lyr6$LY_mines1W_Ridership),"LY_mines1W_Ridership"] <- mean(finaldataset_rwshd_lyr6[is.na(finaldataset_rwshd_lyr6$LYRidership),"TYRidership"])
+
+# add lag 1 day
+finaldataset_rwshd_lyr6$LDDate <- finaldataset_rwshd_lyr6$Date -1
+finaldataset_rwshd_lyr6 <- merge(finaldataset_rwshd_lyr6,finaldataset_rwshd_lyr6[,c("Date","TYRidership")],by.x = "LDDate",by.y = "Date",all.x = TRUE)
+#head(finaldataset_rwshd_lyr6)
+names(finaldataset_rwshd_lyr6)[7]<-"TYRidership"
+names(finaldataset_rwshd_lyr6)[64]<-"LDRidership"
+finaldataset_rwshd_lyr6[is.na(finaldataset_rwshd_lyr6$LDRidership),"LDRidership"] <- mean(finaldataset_rwshd_lyr6[is.na(finaldataset_rwshd_lyr6$LDRidership),"TYRidership"])
+
+#add lag 2 day
+finaldataset_rwshd_lyr6$L2DDate <- finaldataset_rwshd_lyr6$Date -2
+finaldataset_rwshd_lyr6 <- merge(finaldataset_rwshd_lyr6,finaldataset_rwshd_lyr6[,c("Date","TYRidership")],by.x = "L2DDate",by.y = "Date",all.x = TRUE)
+#head(finaldataset_rwshd_lyr6)
+names(finaldataset_rwshd_lyr6)[8]<-"TYRidership"
+names(finaldataset_rwshd_lyr6)[66]<-"L2DRidership"
+finaldataset_rwshd_lyr6[is.na(finaldataset_rwshd_lyr6$L2DRidership),"L2DRidership"] <- mean(finaldataset_rwshd_lyr6[is.na(finaldataset_rwshd_lyr6$L2DRidership),"TYRidership"])
+
+
+```
+
+```{r,warning=FALSE}
+finaldataset_rwshd_lyr <- finaldataset_rwshd_lyr6[finaldataset_rwshd_lyr6$Date >= '2013-12-31',]
+
+# Use Null value to replace NA values
+finaldataset_rwshd_lyr[is.na(finaldataset_rwshd_lyr$LYRidership),"LYRidership"] <- mean(finaldataset_rwshd_lyr[is.na(finaldataset_rwshd_lyr$LYRidership),"TYRidership"])
+
+finaldataset_rwshd_lyr[is.na(finaldataset_rwshd_lyr$X2YRidership),"X2YRidership"] <- mean(finaldataset_rwshd_lyr[is.na(finaldataset_rwshd_lyr$X2YRidership),"TYRidership"])
+
+finaldataset_rwshd_lyr[is.na(finaldataset_rwshd_lyr$LDRidership),"LDRidership"] <- mean(finaldataset_rwshd_lyr[is.na(finaldataset_rwshd_lyr$LDRidership),"TYRidership"])
+
+# Removing Thanksgiving  
+finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$TYRidership == 0,"TYRidership"] <- mean(finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Holiday == "Thanksgiving","TYRidership"])
+```
+
+```{r,warning=FALSE}
+
+# Deal with 1/6/2014 - 1/7/2014 school closed ridership fluctuation
+finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$X2YDate == '2014-01-06',"X2YRidership"] <- mean(finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date == '2014-01-06',"LYRidership"])
+
+finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$LYDate == '2014-01-06',"LYRidership"] <- mean(finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$LYDate == '2014-01-06',"TYRidership"])
+
+finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date == '2014-01-06',"TYRidership"] <- mean(finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date == '2014-01-06',"LYRidership"])
+
+finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$X2YDate == '2014-01-07',"X2YRidership"] <- mean(finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date == '2014-01-07',"LYRidership"])
+
+finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$LYDate == '2014-01-07',"LYRidership"] <- mean(finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$LYDate == '2014-01-07',"TYRidership"])
+
+finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date == '2014-01-07',"TYRidership"] <- mean(finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date == '2014-01-07',"LYRidership"])
+
+finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date == '2014-01-13',"LWRidership"] <- mean(finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date == '2014-01-13',"TYRidership"])
+
+```
+
+# We derive month, week of month and quarter of the year variables from ridership date
+
+```{r,warning=FALSE}
+finaldataset_rwshd_lyr$month <- as.factor(month(finaldataset_rwshd_lyr$Date))
+finaldataset_rwshd_lyr$quarter <- as.factor(quarter(finaldataset_rwshd_lyr$Date))
+finaldataset_rwshd_lyr$weekofmonth <- as.factor(ceiling(day(finaldataset_rwshd_lyr$Date)/ 7))
+finaldataset_rwshd_lyr$weekdayorend <- as.factor(ifelse(weekdays(finaldataset_rwshd_lyr$Date) %in% c("Saturday", "Sunday"), "weekend", "weekday"))
+```
+
+```{r,warning=FALSE}
+finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date == as.Date('2016-12-31'),][,13:58]<-'OFF'
+finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date == as.Date('2017-01-01'),][,13:58]<-'OFF'
+
+```
+
+```{r,warning=FALSE}
+
+fixed_LYridership <- read.csv('Easter_Flag.csv')
+finaldataset_rwshd_lyr$spw_flag <- fixed_LYridership$Easter_Week_Flag
+#finaldataset_rwshd_lyr$spw_flag <- as.factor(finaldataset_rwshd_lyr$spw_flag)
+
+#finaldataset_rwshd_lyr$Chris_flag<- fixed_LYridership$Chris_flag
+#finaldataset_rwshd_lyr$Chris_flag<-as.factor(fixed_LYridership$Chris_flag)
+#head(finaldataset_rwshd_lyr)
+```
+
+# Holidays from current year and previous year are not accurately mapped due to equivalent day's not being holiday's and vice versa. We make sure that they are revised and mapped correctly.
+
+```{r,warning=FALSE}
+main_data <- finaldataset_rwshd_lyr
+main_data <- subset(main_data, select = c("LYDate","Date","TYRidership","Holiday","day","LYRidership","X2YRidership"))
+main_data$Date <- as.Date(main_data$Date)
+##updating 2015 new year as a holiday
+holiday <- read.csv("updated_calendar_holidays.csv")
+holiday$Date <- as.Date(mdy(holiday$Date))
+#dates_ly <- main_data %>% filter(Holiday != "NULL") %>% select(LYDate)
+new_data_hols <- left_join(main_data,holiday, by = "Date")
+new_data_hols$LYHolidayDate <- as.Date(mdy(new_data_hols$LYHolidayDate))
+new_data_hols$X2YHolidayDate <- as.Date(mdy(new_data_hols$X2YHolidayDate))
+#main_data_date <- main_data$Date
+#new_data_sub <- subset(new_data_hols, select = c("Date","TYRidership"))
+ridership2012<-read.csv("2012Ridership.csv")
+ridership2012$Date <-as.Date(ridership2012$Date)
+ridership2012 <- ridership2012%>%group_by(Date) %>%summarise(Ridership = sum(Total.Uses))
+usage_pred <- read.csv("Usage.csv")
+usage_pred <- subset(usage_pred, select = c("Date","Ridership"))
+usage_pred$Date <- as.Date(mdy(usage_pred$Date))
+final_ridership <- rbind(ridership2012,usage_pred)
+new_data_hols2 <- merge(new_data_hols, final_ridership, by.x = "LYHolidayDate", by.y = "Date", all.x = TRUE)
+colnames(new_data_hols2)[13] <- "last_year_holiday_ridership" 
+new_data_hols3 <- merge(new_data_hols2, final_ridership, by.x = "X2YHolidayDate", by.y = "Date", all.x = TRUE)
+colnames(new_data_hols3)[14] <- "last_two_year_holiday_ridership" 
+new_data_hols3_cleaned <- subset(new_data_hols3, select = c("Date","LYDate.x","X2YDate",
+                                                            "Holiday.x","LYHolidayDate",
+                              "X2YHolidayDate","TYRidership","LYRidership","X2YRidership", 
+                              "last_year_holiday_ridership",
+                              "last_two_year_holiday_ridership","day"))
+## replacing NAs with the mean
+mean_1 <- new_data_hols3_cleaned %>% filter(Holiday.x == "New Year's Eve") %>% 
+  mutate(avg_ridership = mean(TYRidership))
+mean_2 <- new_data_hols3_cleaned %>% filter(Holiday.x == "Suburban School Patrol Day 1") %>% 
+  mutate(avg_ridership = mean(TYRidership))
+new_data_hols3_cleaned$last_two_year_holiday_ridership[1] <- 47522.75
+new_data_hols3_cleaned$last_two_year_holiday_ridership[9] <- 18732.5
+#final_data <- if_else(new_data_hols3_cleaned$Holiday.x != "NULL",new_data_hols3_cleaned$LYRidership == new_data_hols3_cleaned$last_year_holiday_ridership,new_data_hols3_cleaned$LYRidership)
+final_data <- new_data_hols3_cleaned
+final_data$LYRidership[1:100] <- final_data$last_year_holiday_ridership[1:100]
+final_data$X2YRidership[1:100] <- final_data$last_two_year_holiday_ridership[1:100]
+holiday_revised_ridership <- subset(final_data, select = c("Date","LYRidership","X2YRidership"))
+colnames(holiday_revised_ridership) <- c("Date","revised_LY_ridership","revised_x2y_ridership")
+```
+
+# Apart from the existing lag days of ridership, we add 14,21,28,35,42 and 49 day lags of ridership.
+
+```{r,warning=FALSE}
+finaldataset_rwshd_lyr <- merge(finaldataset_rwshd_lyr,holiday_revised_ridership,all.x = TRUE)
+# add lag 14 day
+finaldataset_rwshd_lyr$L2wDate <- finaldataset_rwshd_lyr$Date -14
+# add lag 21 day
+finaldataset_rwshd_lyr$L3wDate <- finaldataset_rwshd_lyr$Date -21
+# add lag 28 day
+finaldataset_rwshd_lyr$L4wDate <- finaldataset_rwshd_lyr$Date -28
+# add lag 35 day
+finaldataset_rwshd_lyr$L5wDate <- finaldataset_rwshd_lyr$Date -35
+# add lag 42 day
+finaldataset_rwshd_lyr$L6wDate <- finaldataset_rwshd_lyr$Date - 42
+# add lag 49 day
+finaldataset_rwshd_lyr$L7wDate <- finaldataset_rwshd_lyr$Date - 49
+
+
+finaldataset_rwshd_lyr1 <- merge(finaldataset_rwshd_lyr,final_ridership,by.x = "L2wDate",by.y = "Date",all.x = TRUE)
+finaldataset_rwshd_lyr2 <- merge(finaldataset_rwshd_lyr1,final_ridership,by.x = "L3wDate",by.y = "Date",all.x = TRUE)
+finaldataset_rwshd_lyr3 <- merge(finaldataset_rwshd_lyr2,final_ridership,by.x = "L4wDate",by.y = "Date",all.x = TRUE)
+
+
+
+colnames(finaldataset_rwshd_lyr3)[80:82] <- c("l2w_ridership","l3w_ridership","l4w_ridership")
+finaldataset_rwshd_lyr <- finaldataset_rwshd_lyr3
+```
+
+# School names were not in format that can be accepted by R. We rename them to comply with R format.
+
+```{r,warning=FALSE}
+colnames(finaldataset_rwshd_lyr)[16:61] <-c('Status..Anoka.Hennepin.....Dist.11',
+'Status..Blake.Schools..Hopkins..Wayzata..Mpls.',
+'Status..Bloomington.....Dist.271',
+'Status..Brooklyn.Center.....Dist.286',
+'Status..Burnsville.....Dist.191',
+'Status..Centennial.....Dist.12',
+'Status..Chaska.Area...Dist.112',
+'Status..Columbia.Heights.....Dist.13',
+'Status..Eden.Prairie.....Dist.272',
+'Status..Edina.....Dist.273',
+'Status..Elk.River.....Dist.728',
+'Status..Farmington',
+'Status..Forest.Lake.....Dist.831',
+'Status..Fridley.....Dist.14',
+'Status..Hastings.....Dist.200',
+'Status..Hopkins.....Dist.270',
+'Status..Inver.Grove.Heights.....Dist.199',
+'Status..Jordan.....Dist.717',
+'Status..Lakeville...Dist.194',
+'Status..Mahtomedi.....Dist.832',
+'Status..Minneapolis.....Dist.1',
+'Status..Minnehaha.Academy..Mpls..Blmgtn.',
+'Status..Minnetonka.....Dist.276',
+'Status..Monticello.....Dist.882',
+'Status..Mounds.View.....Dist.621',
+'Status..N..St..Paul.Maplewood.Oakdale.Dist.622',
+'Status..Orono.....Dist.278',
+'Status..Osseo.....Dist.279',
+'Status..Prior.Lake.....Dist.719',
+'Status..Richfield.....Dist.280',
+'Status..Rosemount.Apple.Valley.Eagan...Dist.196',
+'Status..Roseville.....Dist.623',
+'Status..Shakopee.....Dist.720',
+'Status..South.St..Paul.....Dist.6',
+'Status..South.Washington.County.....Dist.833',
+'Status..Spring.Lake.Park.....Dist.16',
+'Status..St.Anthony.New.Brighton.....Dist.282',
+'Status..St..Cloud...Dist.742',
+'Status..St..Francis.....Dist.15',
+'Status..St..Paul.....Dist.625',
+'Status..Stillwater',
+'Status..Waconia.....Dist.110',
+'Status..Wayzata.Plymouth.....Dist.284',
+'Status..West.St..Paul.....Dist.197',
+'Status..Westonka..Mound......Dist.277',
+'Status..White.Bear.Lake.....Dist.624')
+write.csv(finaldataset_rwshd_lyr,"finaldataset_rwshd_lyr")
+```
+
+# Building the SVM static model by using the MLR package in R. We train a static model with C = 3 and kernel = 'Laplace'. We then predict using the trained model equation. The output of the model will appear as RMSE, MAE and MAPE.
+
+```{r,warning=FALSE}
+set.seed(6281)
+test <- finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date <= '2016-09-30',]
+validation <- finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date > '2016-09-30',][1:365,]
+svmlearner <- makeLearner("regr.ksvm",predict.type = "response")
+trainnew <- subset(test,select = -c(1,2,3,4,5,6,7,8,9,10,12,13,14,15,64,65,66,68,69,70,77,78,79))
+testnew <- subset(validation,select = -c(1,2,3,4,5,6,7,8,9,10,12,13,14,15,64,65,66,68,69,70,77,78,79))
+trainTask <- makeRegrTask(data = trainnew,target = "TYRidership")#7,8,9,10,61
+testTask <- makeRegrTask(data = testnew,target = "TYRidership")#,7,8,9,10,61
+crossval <- makeResampleDesc("RepCV",folds=10)
+```
+
+```{r,warning=FALSE}
+optimized <- makeParamSet(
+  makeDiscreteParam("kernel",values =c("laplacedot")), #c("vanilladot","polydot","rbfdot","tanhdot","laplacedot")),
+  makeIntegerParam("C",lower = 3,upper =3))
+tunegrid <- makeTuneControlGrid(resolution = 50)
+paramfinal <- tuneParams(learner = svmlearner, resampling = crossval, task = trainTask, par.set = optimized, control = tunegrid, measures = list(mlr::rmse,mlr::mae,mlr::mape),show.info = TRUE)
+```
+
+# Prediction for static model
+
+```{r,warning=FALSE}
+svmregfinal <- setHyperPars(svmlearner, par.vals = paramfinal$x)
+l = mlr::train(svmregfinal,trainTask)
+prediction <- predict(l,task = testTask)
+actual <- predict(l,task = trainTask)
+mlr::performance(prediction,list(mlr::rmse,mlr::mae,mlr::mape))
+dfpredict <- cbind(data.frame(prediction$data$truth),data.frame(prediction$data$response),data.frame(validation$Date))
+dfpredict <- arrange(dfpredict,prediction.data.truth)
+
+#ggplot() + geom_line(data = dfpredict,aes(x=validation.Date,y=prediction.data.response,color = "red")) + geom_line(data = dfpredict,aes(x=validation.Date,y=prediction.data.truth,color = "green")) +labs(title="Actual Vs Predicted SVM Static",x="Date", y = "Ridership") + scale_color_discrete(name = "Legend",labels = c("Prediction", "Actual"))
+
+dfpredict$error<-abs(dfpredict$prediction.data.truth - dfpredict$prediction.data.response)
+```
+
+
+# Building the SVM 2-week dynamic model by using the MLR package in R. We train the model with C = 3 and kernel = 'Laplace'. We then predict using the trained model equation. The output of the model will appear as RMSE, MAE and MAPE.
+
+```{r,warning=FALSE}
+truth1 <- data.frame()
+response1 <- data.frame ()
+
+#head(finaldataset_rwshd_lyr)
+
+# Function that returns Root Mean Squared Error
+rmse <- function(error)
+{
+    sqrt(mean(error^2))
+}
+
+# Function that returns Mean Absolute Error
+mae <- function(error)
+{
+    mean(abs(error))
+}
+
+# Function that returns MAPE
+mape <- function(truth, response)
+{
+    mean(abs((truth-response)/truth))
+}
+train <- finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date <= '2016-09-30',]
+  svmlearner <- makeLearner("regr.ksvm",predict.type = "response")
+  trainnew = subset(train,select = -c(1,2,3,4,5,6,7,8,9,10,64,65,66,68,69,77,78,79))
+  trainTask <- makeRegrTask(data = trainnew,target = "TYRidership") #7,8,9,10,61#,7,8,9,10,61
+  crossval <- makeResampleDesc("RepCV",folds=10)
+  
+  optimized <- makeParamSet(
+  makeDiscreteParam("kernel",values =c("laplacedot")), #c("vanilladot","polydot","rbfdot","tanhdot","laplacedot")),
+  makeIntegerParam("C",lower = 3,upper =3))
+  tunegrid <- makeTuneControlGrid(resolution = 50)
+  paramfinal <- tuneParams(learner = svmlearner, resampling = crossval, task = trainTask, par.set = optimized, control = tunegrid, measures = list(mlr::rmse,mlr::mae,mlr::mape),show.info = TRUE)
+
+  svmregfinal <- setHyperPars(svmlearner, par.vals = paramfinal$x)
+  l = mlr::train(svmregfinal,trainTask)
+  
+dynamic_truth <- list()
+dynamic_response <- list()
+dynamic_error <-list()
+for (week in 1:26){
+  
+  test <- finaldataset_rwshd_lyr[((finaldataset_rwshd_lyr$Date > (as.Date('2016-09-30')-14+week*14))) & (finaldataset_rwshd_lyr$Date <=  (as.Date('2016-09-30')-14+week*28)),]
+   
+  for_test_append<-finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date > '2016-09-30',]
+
+  test<-rbind(test,for_test_append)
+  testnew = subset(test,select = -c(1,2,3,4,5,6,7,8,9,10,64,65,66,68,69,77,78,79))
+  testTask <- makeRegrTask(data = testnew,target = "TYRidership")
+  pred <- predict(l,task = testTask)
+  actual <- predict(l,task = trainTask)
+  
+  truth <- data.frame(pred$data$truth)[1:14,]
+  response <-data.frame(pred$data$response)[1:14,]
+  
+  error <-data.frame(pred$data$truth)-data.frame(pred$data$response)
+  error<-error[1:14,]
+  dynamic_error <-c(dynamic_error, error)
+  dynamic_truth <- c(dynamic_truth, truth)
+  dynamic_response <- c(dynamic_response, response)
+  
+  
+  truth1 <- append(truth1,truth)
+  response1 <- append(response1,response)
+  }
+#mean(unlist(dynamic_rmse))
+#mean(unlist(dynamic_mae))
+#mean(unlist(dynamic_mape))
+#train[,-c(1,2,3,4,5,6,60)]
+#test[,-c(1,2,3,4,5,6,7,61)]
+rmse(unlist(dynamic_error))
+mae(unlist(dynamic_error))
+mapedataframe <- NULL
+mapedataframe$truth <- unlist(dynamic_truth)
+mapedataframe$response <- unlist(dynamic_response)
+mapedataframe$percerror <- abs(mapedataframe$truth - mapedataframe$response)/mapedataframe$truth
+mean(mapedataframe$percerror)
+
+truth1 <- do.call(rbind,truth1)
+response1 <- do.call(rbind,response1)
+#date1 <- list(ymd(for_test_append$Date))
+date1 <- as.data.frame(for_test_append$Date[1:364])
+
+dfpredict <- cbind(date1,truth1,response1)
+colnames(dfpredict) <- c("date","actual","prediction")
+
+# ggplot() + geom_line(data = dfpredict,aes(x=date,y=prediction,color = "red")) + 
+#  geom_line(data = dfpredict,aes(x=date,y= actual,color = "green")) +
+# labs(title="Actual Vs Predicted SVM Dynamic (two weeks)",x="Date", y = "Ridership") + scale_color_discrete(name = "Legend",labels = c("Prediction", "Actual"))
+
+
+
+
+```
+
+# Building the SVM 1-day dynamic model by using the MLR package in R. We train the model with C = 3 and kernel = 'Laplace'. We then predict using the trained model equation. The output of the model will appear as RMSE, MAE and MAPE.
+
+```{r,warning=FALSE}
+# Function that returns Root Mean Squared Error
+truth1 <- data.frame()
+response1 <- data.frame ()
+
+rmse <- function(error)
+{
+    sqrt(mean(error^2))
+}
+
+# Function that returns Mean Absolute Error
+mae <- function(error)
+{
+    mean(abs(error))
+}
+
+# Function that returns MAPE
+mape <- function(truth, response)
+{
+    mean(abs((truth-response)/truth))
+}
+
+train <- finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date <= '2016-09-30',]
+  svmlearner <- makeLearner("regr.ksvm",predict.type = "response")
+  trainnew = subset(train,select = -c(1,2,3,4,5,6,7,8,9,10,64,65,77,78,79))
+  trainTask <- makeRegrTask(data = trainnew,target = "TYRidership") #7,8,9,10,61#,7,8,9,10,61
+  crossval <- makeResampleDesc("RepCV",folds=10)
+  
+  optimized <- makeParamSet(
+  makeDiscreteParam("kernel",values =c("laplacedot")), #c("vanilladot","polydot","rbfdot","tanhdot","laplacedot")),
+  makeIntegerParam("C",lower = 3,upper =3))
+  tunegrid <- makeTuneControlGrid(resolution = 50)
+  paramfinal <- tuneParams(learner = svmlearner, resampling = crossval, task = trainTask, par.set = optimized, control = tunegrid, measures = list(mlr::rmse,mlr::mae,mlr::mape),show.info = TRUE)
+
+  svmregfinal <- setHyperPars(svmlearner, par.vals = paramfinal$x)
+  l = mlr::train(svmregfinal,trainTask)
+  
+dynamic_truth <- list()
+dynamic_response <- list()
+dynamic_error <-list()
+
+for (week in 1:365){
+  train <- finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date <= (as.Date('2016-09-30')-1+week*1),]
+  test <- finaldataset_rwshd_lyr[((finaldataset_rwshd_lyr$Date > (as.Date('2016-09-30')-1+week*1))) & (finaldataset_rwshd_lyr$Date <=  (as.Date('2016-09-30')-14+week*28)),]
+  for_test_append<-finaldataset_rwshd_lyr[finaldataset_rwshd_lyr$Date > '2016-09-30',]
+
+  test<-rbind(test,for_test_append)
+  testnew = subset(test,select = -c(1,2,3,4,5,6,7,8,9,10,64,65,77,78,79))
+  testTask <- makeRegrTask(data = testnew,target = "TYRidership")
+  pred <- predict(l,task = testTask)
+  actual <- predict(l,task = trainTask)
+  
+  truth <- data.frame(pred$data$truth)[1,]
+  response <-data.frame(pred$data$response)[1,]
+  
+  error <-data.frame(pred$data$truth)-data.frame(pred$data$response)
+  error<-error[1,]
+  dynamic_error <-c(dynamic_error, error)
+  dynamic_truth <- c(dynamic_truth, truth)
+  dynamic_response <- c(dynamic_response, response)
+  
+   truth1 <- append(truth1,truth)
+  response1 <- append(response1,response)
+}
+#mean(unlist(dynamic_rmse))
+#mean(unlist(dynamic_mae))
+#mean(unlist(dynamic_mape))
+rmse(unlist(dynamic_error))
+mae(unlist(dynamic_error))
+mapedataframe <- NULL
+mapedataframe$truth <- unlist(dynamic_truth)
+mapedataframe$response <- unlist(dynamic_response)
+mapedataframe$percerror <- abs(mapedataframe$truth - mapedataframe$response)/mapedataframe$truth
+mean(mapedataframe$percerror)
+
+
+
+truth1 <- do.call(rbind,truth1)
+response1 <- do.call(rbind,response1)
+#date1 <- list(ymd(for_test_append$Date))
+date1 <- as.data.frame(for_test_append$Date[1:365])
+
+dfpredict <- cbind(date1,truth1,response1)
+colnames(dfpredict) <- c("date","actual","prediction")
+
+# ggplot() + geom_line(data = dfpredict,aes(x=date,y=prediction,color = "red")) + 
+#  geom_line(data = dfpredict,aes(x=date,y= actual,color = "green")) +
+# labs(title="Actual Vs Predicted SVM Dynamic (One Day)",x="Date", y = "Ridership") + scale_color_discrete(name = "Legend",labels = c("Prediction", "Actual"))
+```
